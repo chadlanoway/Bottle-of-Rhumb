@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <title>Map Starter</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js"></script>
+    <link href="https://api.mapbox.com/mapbox-gl-js/v3.4.0/mapbox-gl.css" rel="stylesheet" />
+    <script src="https://api.mapbox.com/mapbox-gl-js/v3.4.0/mapbox-gl.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mapbox-pmtiles@1.0.54/dist/mapbox-pmtiles.umd.js"
+    crossorigin="anonymous"></script>
+
+    <style>
+        html,
+        body,
+        #map {
+            height: 100%;
+            margin: 0;
+        }
+
+        #map {
+            position: absolute;
+            inset: 0;
+        }
+
+        :root {
+            --panel-w: clamp(280px, 32vw, 420px);
+            --tab-w: 40px;
+            --edge-gap: 12px;
+            --rad: 12px;
+            --bg: #0b0b0e;
+            --bd: #333;
+        }
+
+        .tools-wrap {
+            position: absolute;
+            top: 12px;
+            left: 0;
+            z-index: 3;
+            /* <- flush to edge when closed */
+            width: var(--tab-w);
+            height: auto;
+            overflow: hidden;
+            transform: translateX(0);
+            /* closed: no offset */
+            transition: width .25s ease, transform .25s ease;
+        }
+
+        .tools-wrap.open {
+            width: var(--panel-w);
+            overflow: visible;
+            transform: translateX(var(--edge-gap));
+            /* open: add the 12px gap */
+        }
+
+        /* PANEL: slides inside wrapper by (panel - tab) when closed */
+        .tools-panel {
+            width: var(--panel-w);
+            max-height: 75vh;
+            overflow-y: auto;
+            overflow-x: hidden;
+            box-sizing: border-box;
+            background: #0b0b0e;
+            color: #eee;
+            border: 1px solid #333;
+            border-radius: 12px;
+            padding: 10px 10px 12px;
+            transform: translateX(calc(-1 * (var(--panel-w) - var(--tab-w))));
+            transition: transform .25s ease;
+            will-change: transform;
+        }
+
+        .tools-wrap.open .tools-panel {
+            transform: translateX(0);
+        }
+
+        /* TAB: always at the wrapper's right edge */
+        .tools-tab {
+            position: absolute;
+            top: 8px;
+            right: 0;
+            width: var(--tab-w);
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: transparent;
+            border: 0;
+            outline: none;
+            appearance: none;
+            -webkit-appearance: none;
+            color: #eee;
+            border-radius: 0 8px 8px 0;
+            cursor: pointer;
+            user-select: none;
+            z-index: 4;
+        }
+
+
+        .tools-panel h3 {
+            margin: 0 0 8px;
+            font: 600 14px system-ui;
+        }
+
+        .tools-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-bottom: 6px;
+        }
+
+        .tools-panel button {
+            margin: 0;
+            padding: 6px 10px;
+            border-radius: 8px;
+            border: 1px solid #333;
+            background: #222;
+            color: #eee;
+            cursor: pointer;
+        }
+
+        .tools-small {
+            font: 12px system-ui;
+            color: #bbb;
+            margin-top: 6px;
+        }
+
+        /* RIGHT-SIDE WRAPPER */
+        /* Wrapper (right): closed = tab width, open = panel width */
+        .side-wrap {
+            position: absolute;
+            top: 12px;
+            z-index: 3;
+            height: auto;
+            overflow: hidden;
+            transition: width .25s ease, transform .25s ease;
+        }
+
+        .side-right {
+            right: 0;
+            width: var(--tab-w);
+            transform: translateX(0);
+        }
+
+        .side-right.open {
+            width: var(--panel-w);
+            transform: translateX(calc(-1 * var(--edge-gap)));
+        }
+
+        /* Panel (right): slides inside wrapper by +(panel - tab) when closed */
+        .side-panel {
+            width: var(--panel-w);
+            max-height: 75vh;
+            overflow-y: auto;
+            overflow-x: hidden;
+            box-sizing: border-box;
+            background: var(--bg);
+            color: #eee;
+            border: 1px solid var(--bd);
+            border-radius: var(--rad);
+
+            /* base padding matches your left panel when collapsed */
+            padding: 10px 10px 12px;
+
+            /* hide the panel body (leave only the tab visible) */
+            transform: translateX(calc(var(--panel-w) - var(--tab-w)));
+            transition: transform .25s ease;
+            will-change: transform;
+        }
+
+        /* When open, slide panel fully in AND add a gutter so the tab doesn't sit over text */
+        .side-right.open .side-panel {
+            transform: translateX(0);
+            padding-left: calc(10px + var(--tab-w));
+            /* <-- creates space under the tab */
+        }
+
+        /* Tab fixed to the wrapper’s left edge (mirrors .tools-tab behavior) */
+        .side-tab {
+            position: absolute;
+            top: 8px;
+            left: 0;
+            width: var(--tab-w);
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+
+            /* same neutral button reset as left tab */
+            background: black;
+            border: 0;
+            outline: none;
+            appearance: none;
+            -webkit-appearance: none;
+
+            color: #eee;
+            border-radius: 8px 0 0 8px;
+            cursor: pointer;
+            user-select: none;
+            z-index: 4;
+        }
+
+
+        /* JSON editor */
+        #jsonPanel h3 {
+            margin: 0 0 8px;
+            font: 600 14px system-ui;
+        }
+
+        .json-actions {
+            display: flex;
+            gap: 6px;
+            margin-bottom: 6px;
+        }
+
+        .json-actions button {
+            padding: 6px 10px;
+            border-radius: 8px;
+            border: 1px solid var(--bd);
+            background: #222;
+            color: #eee;
+            cursor: pointer;
+        }
+
+        #jsonText {
+            width: 100%;
+            height: 50vh;
+            resize: vertical;
+            background: #111;
+            color: #e6e6e6;
+            border: 1px solid #222;
+            border-radius: 8px;
+            font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+            padding: 8px;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="map"></div>
+    <div id="toolsWrap" class="tools-wrap">
+        <aside id="toolsPanel" class="tools-panel">
+            <h3>Draw tools</h3>
+            <div class="tools-row">
+                <button id="btnPoint">Point</button>
+                <button id="btnLine">Line</button>
+                <button id="btnPoly">Polygon</button>
+                <button id="btnClear">Clear</button>
+                <button id="btnAutoroute">Autoroute</button>
+            </div>
+            <div class="tools-small" id="toolsStatus">click a tool to start drawing</div>
+        </aside>
+
+        <!-- the tab is a sibling, anchored to the wrapper’s right edge -->
+        <button id="toolsTab" class="tools-tab" aria-expanded="false" title="Tools">🛠️</button>
+    </div>
+
+    <!-- Right-side JSON panel -->
+    <div id="jsonWrap" class="side-wrap side-right">
+        <aside id="jsonPanel" class="side-panel">
+            <h3>GeoJSON</h3>
+            <div class="json-actions">
+                <button id="btnCopyJson">Copy</button>
+                <button id="btnDownloadJson">Download</button>
+            </div>
+            <textarea id="jsonText" spellcheck="false"></textarea>
+        </aside>
+        <button id="jsonTab" class="side-tab" aria-expanded="false" title="GeoJSON"><span>{ }</span></button>
+    </div>
+    
+    <script type="module" src="/app.js"></script>
+</body>
+
+</html>
