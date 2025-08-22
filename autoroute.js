@@ -1,259 +1,245 @@
-// autoroute.js — water-only routing against a Mapbox "land" fill layer
-// Exports: autoroute(map, [ [lng,lat], ... ], options)
-
-const sleep = (ms = 0) => new Promise(r => setTimeout(r, ms));
-
-export async function autoroute(map, waypoints, opts = {}) {
-    const cfg = {
-        // collision detection
-        landLayerId: opts.landLayerId || 'land-mask-fill',
-        padPx: opts.padPx ?? 3,                 // inflate land hit-box in screen px
-        sampleMeters: opts.sampleMeters ?? 1200, // spacing along a candidate segment
-        // marching
-        stepMetersNear: opts.stepMetersNear ?? 6000,
-        stepMetersFar: opts.stepMetersFar ?? 45000,
-        coastNearMeters: opts.coastNearMeters ?? 30000, // switch to "near coast" mode inside this
-        maxSteps: opts.maxSteps ?? 20000,
-        // detour search (spiral around first hit / midpoint)
-        detour: {
-            startKm: opts.detour?.startKm ?? 6,   // start radius
-            endKm: opts.detour?.endKm ?? 600, // max radius
-            grow: opts.detour?.grow ?? 1.6, // multiply radius each ring
-            angStep: opts.detour?.angStep ?? 10,  // degrees between bearings on a ring
-            yieldEveryRings: 1
-        },
-        // guards / UI
-        yieldEvery: opts.yieldEvery ?? 30
-    };
-
-    if (!map.getLayer(cfg.landLayerId)) {
-        throw new Error(`Land layer not found: ${cfg.landLayerId}`);
-    }
-
-    const out = [];
-    for (let i = 0; i < waypoints.length - 1; i++) {
-        const a = waypoints[i];
-        const b = waypoints[i + 1];
-        const seg = await routeOne(map, a, b, cfg);
-        if (i > 0 && seg.length) seg.shift();
-        out.push(...seg);
-    }
-
-    return {
-        type: 'Feature',
-        properties: { kind: 'autoroute' },
-        geometry: { type: 'LineString', coordinates: out }
-    };
-}
-
-/* ---------------- core segment router ---------------- */
-
-async function routeOne(map, A, B, cfg) {
-    const out = [A];
-    let cur = A;
-    let steps = 0;
-
-    while (distM(cur, B) > cfg.stepMetersNear && steps < cfg.maxSteps) {
-        steps++;
-        if (steps % cfg.yieldEvery === 0) await sleep(0);
-
-        const toB = bearing(cur, B);
-        const nearCoast = isNearCoast(map, cur, cfg);
-        const STEP = nearCoast ? cfg.stepMetersNear : cfg.stepMetersFar;
-        const SAMPLE = nearCoast ? cfg.sampleMeters : Math.max(cfg.sampleMeters * 3, 3000);
-
-        // try straight
-        let next = dest(cur, STEP, toB);
-        if (await segmentIsClear(map, cur, next, cfg, SAMPLE)) {
-            out.push(next);
-            cur = next;
-            continue;
-        }
-
-        // tighten straight with binary search
-        const okPoint = await straightTighten(map, cur, toB, STEP, cfg, SAMPLE);
-        if (okPoint) {
-            out.push(okPoint);
-            cur = okPoint;
-            continue;
-        }
-
-        // detour: find a via around the first hit (or midpoint if we missed the hit)
-        const via = await findDetour(map, cur, B, cfg, SAMPLE);
-        if (via) {
-            out.push(via);
-            cur = via;
-            continue;
-        }
-
-        // nothing worked → break out and we’ll try to hop into B if that’s clear
-        break;
-    }
-
-    if (await segmentIsClear(map, cur, B, cfg, cfg.sampleMeters)) out.push(B);
-    return out;
-}
-
-/* ---------------- detour search ---------------- */
-
-async function findDetour(map, A, B, cfg, SAMPLE) {
-    const hit = await firstHitOnSegment(map, A, B, cfg) || midpoint(A, B);
-    const { startKm, endKm, grow, angStep, yieldEveryRings } = cfg.detour;
-
-    // bias around perpendicular to AB (reduces ping-pong and big loops)
-    const base = bearing(A, B);
-    const preferred = [...angleFan(90, angStep), ...angleFan(-90, angStep)];
-
-    let r = startKm * 1000;
-    let ring = 0;
-
-    // spiral outwards
-    while (r <= endKm * 1000) {
-        ring++;
-        // 1) try biased bearings first
-        for (const d of preferred) {
-            const theta = norm360(base + d);
-            const via = dest(hit, r, theta);
-            if (isLand(map, via, cfg)) continue;
-            const okA = await segmentIsClear(map, A, via, cfg, SAMPLE);
-            if (!okA) continue;
-            const okB = await segmentIsClear(map, via, B, cfg, SAMPLE);
-            if (!okB) continue;
-            return via;
-        }
-
-        // 2) full sweep around the ring
-        for (let ang = 0; ang < 360; ang += angStep) {
-            const via = dest(hit, r, ang);
-            if (isLand(map, via, cfg)) continue;
-            const okA = await segmentIsClear(map, A, via, cfg, SAMPLE);
-            if (!okA) continue;
-            const okB = await segmentIsClear(map, via, B, cfg, SAMPLE);
-            if (!okB) continue;
-            return via;
-        }
-
-        if (ring % yieldEveryRings === 0) await sleep(0);
-        r *= grow;
-    }
-
-    // fallback: two-hop coarse guess (left / right)
-    const LEFT = dest(hit, startKm * 1500, norm360(base + 90));
-    const RIGHT = dest(hit, startKm * 1500, norm360(base - 90));
-    const candidates = [LEFT, RIGHT].filter(p => !isLand(map, p, cfg));
-    for (const via of candidates) {
-        const okA = await segmentIsClear(map, A, via, cfg, SAMPLE);
-        const okB = await segmentIsClear(map, via, B, cfg, SAMPLE);
-        if (okA && okB) return via;
-    }
-
-    throw new Error('No valid detour found');
-}
-
-function angleFan(center, step) {
-    // e.g. center=90 => [0,180, 15,165, 30,150, ...] mirrored around center
-    const arr = [];
-    for (let d = 0; d <= 180; d += step) {
-        arr.push(center - d);
-        if (d) arr.push(center + d);
-    }
-    return arr;
-}
-
-/* ---------------- collision helpers ---------------- */
-
-async function straightTighten(map, cur, toB, STEP, cfg, SAMPLE) {
-    let lo = 0, hi = STEP, ok = null;
-    for (let i = 0; i < 14; i++) {
-        const mid = (lo + hi) / 2;
-        const test = dest(cur, mid, toB);
-        const clear = await segmentIsClear(map, cur, test, cfg, SAMPLE);
-        if (clear) { ok = test; lo = mid; } else { hi = mid; }
-        if (hi - lo < Math.max(300, STEP / 250)) break;
-    }
-    return ok;
-}
-
-async function firstHitOnSegment(map, A, B, cfg) {
-    const d = distM(A, B);
-    const n = clamp(Math.ceil(d / (cfg.sampleMeters * 0.6)), 96, 2048);
-    for (let i = 1; i <= n; i++) {
-        const p = interp(A, B, i / n);
-        if (isLand(map, p, cfg)) return p;
-        if (i % 256 === 0) await sleep(0); // keep UI responsive
-    }
-    return null;
-}
-
-async function segmentIsClear(map, A, B, cfg, spacingMeters) {
-    const d = distM(A, B);
-    const n = clamp(Math.ceil(d / spacingMeters), 4, 4096);
-    for (let i = 1; i <= n; i++) {
-        const p = interp(A, B, i / n);
-        if (isLand(map, p, cfg)) return false;
-        if (i % 512 === 0) await sleep(0);
-    }
-    return true;
-}
-
-function isNearCoast(map, p, cfg) {
-    // quick ring at ~coastNearMeters checks — if any sample sees land, call it "near"
-    const R = cfg.coastNearMeters;
-    for (const a of [0, 60, 120, 180, 240, 300]) {
-        const q = dest(p, R, a);
-        if (isLand(map, q, cfg)) return true;
-    }
-    return false;
-}
-
-function isLand(map, lngLat, cfg) {
-    const pt = map.project({ lng: lngLat[0], lat: lngLat[1] });
-    const r = Math.max(1, cfg.padPx | 0);
-    const min = [pt.x - r, pt.y - r];
-    const max = [pt.x + r, pt.y + r];
-    const feats = map.queryRenderedFeatures([min, max], { layers: [cfg.landLayerId] });
-    return feats && feats.length > 0;
-}
-
-/* ---------------- geo utils ---------------- */
-const EARTH = 6371008.8;
+// autoroute.js — HEX-GRID (H3) A* ROUTER with connectivity-safe corridor + fallbacks
+// needs tightening to speed things up but it's working
+const R = 6371008.8;
 const toRad = d => d * Math.PI / 180;
 const toDeg = r => r * 180 / Math.PI;
-const norm360 = a => ((a % 360) + 360) % 360;
-const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
-function distM(a, b) {
-    const dLat = toRad(b[1] - a[1]);
-    const dLon = toRad(b[0] - a[0]);
+function haversineM(a, b) {
+    const dLat = toRad(b.lat - a.lat), dLon = toRad(b.lng - a.lng);
     const s1 = Math.sin(dLat / 2), s2 = Math.sin(dLon / 2);
-    const lat1 = toRad(a[1]), lat2 = toRad(b[1]);
-    const h = s1 * s1 + Math.cos(lat1) * Math.cos(lat2) * s2 * s2;
-    return 2 * EARTH * Math.asin(Math.min(1, Math.sqrt(h)));
+    const h = s1 * s1 + Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * s2 * s2;
+    return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
 }
-
-function bearing(a, b) {
-    const φ1 = toRad(a[1]), φ2 = toRad(b[1]);
-    const λ1 = toRad(a[0]), λ2 = toRad(b[0]);
-    const y = Math.sin(λ2 - λ1) * Math.cos(φ2);
-    const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(λ2 - λ1);
-    return norm360(toDeg(Math.atan2(y, x)));
-}
-
-function dest(p, distM, brngDeg) {
-    const δ = distM / EARTH, θ = toRad(brngDeg);
-    const φ1 = toRad(p[1]), λ1 = toRad(p[0]);
+function destM(a, distM, brgDeg) {
+    const δ = distM / R, θ = toRad(brgDeg);
+    const φ1 = toRad(a.lat), λ1 = toRad(a.lng);
     const sinφ2 = Math.sin(φ1) * Math.cos(δ) + Math.cos(φ1) * Math.sin(δ) * Math.cos(θ);
     const φ2 = Math.asin(Math.min(1, Math.max(-1, sinφ2)));
     const y = Math.sin(θ) * Math.sin(δ) * Math.cos(φ1);
     const x = Math.cos(δ) - Math.sin(φ1) * Math.sin(φ2);
     const λ2 = λ1 + Math.atan2(y, x);
-    return [((toDeg(λ2) + 540) % 360) - 180, toDeg(φ2)];
+    return { lng: ((toDeg(λ2) + 540) % 360) - 180, lat: toDeg(φ2) };
 }
 
-function interp(a, b, t) {
-    return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+// ── Land checks (Bloom-backed, dilated K rings) ───────────────────────────────
+function makeIsCellBlocked({ h3, hasLandCell, dilateKRings = 1 }) {
+    const memo = new Map();
+    return function isCellBlocked(cell) {
+        if (memo.has(cell)) return memo.get(cell);
+        if (hasLandCell(cell)) { memo.set(cell, true); return true; }
+        if (dilateKRings > 0) {
+            for (const nb of h3.kRing(cell, dilateKRings)) {
+                if (hasLandCell(nb)) { memo.set(cell, true); return true; }
+            }
+        }
+        memo.set(cell, false);
+        return false;
+    };
 }
 
-function midpoint(a, b) {
-    return [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+// Sample a->b every ~sampleMeters; reject if any sampled H3 cell is (dilated) land
+function chordCrossesLand(a, b, { h3, h3Res, isCellBlocked, sampleMeters = 500 }) {
+    const dist = haversineM(a, b);
+    const n = Math.max(1, Math.ceil(dist / sampleMeters));
+    for (let i = 1; i <= n; i++) {
+        const t = i / n;
+        const p = { lng: a.lng + (b.lng - a.lng) * t, lat: a.lat + (b.lat - a.lat) * t };
+        const cell = h3.geoToH3(p.lat, p.lng, h3Res);
+        if (isCellBlocked(cell)) return true;
+    }
+    return false;
+}
+
+// ── Corridor of candidate cells ───────────────────────────────────────────────
+// Base corridor is a padded bbox sampled in lon/lat; we then ensure connectivity
+function corridorCells(A, B, { h3, h3Res, isCellBlocked, padDeg = 3.0, corridorStepDeg = 0.08 }) {
+    const west = Math.min(A.lng, B.lng) - padDeg;
+    const east = Math.max(A.lng, B.lng) + padDeg;
+    const south = Math.min(A.lat, B.lat) - padDeg;
+    const north = Math.max(A.lat, B.lat) + padDeg;
+
+    const cells = new Set();
+    for (let lat = south; lat <= north; lat += corridorStepDeg) {
+        const stepLon = corridorStepDeg / Math.max(0.2, Math.cos(toRad(lat)));
+        for (let lng = west; lng <= east; lng += stepLon) {
+            const cell = h3.geoToH3(lat, lng, h3Res);
+            if (!isCellBlocked(cell)) cells.add(cell);
+        }
+    }
+    return cells;
+}
+
+function expandSetKRings(h3, base, k = 1) {
+    if (!base) return null;
+    const out = new Set(base);
+    for (const c of base) for (const n of h3.kRing(c, k)) out.add(n);
+    return out;
+}
+
+// Nearest water cell to point
+function nearestWaterCell(p, { h3, h3Res, isCellBlocked, maxRings = 60 }) {
+    const seed = h3.geoToH3(p.lat, p.lng, h3Res);
+    if (!isCellBlocked(seed)) return seed;
+    for (let r = 1; r <= maxRings; r++) {
+        for (const c of h3.kRing(seed, r)) {
+            if (!isCellBlocked(c)) return c;
+        }
+    }
+    return null;
+}
+
+function h3Center(cell, h3) {
+    const [lat, lng] = h3.h3ToGeo(cell);
+    return { lng, lat };
+}
+
+// ── A* on H3 ─────────────────────────────────────────────────────────────────
+function aStarH3(startCell, goalCell, { h3, h3Res, isCellBlocked, allowed = null }) {
+    if (startCell === goalCell) return [startCell];
+
+    const open = new Map();  // cell -> f
+    const g = new Map();     // cell -> g
+    const came = new Map();  // cell -> parent
+
+    const goalC = h3Center(goalCell, h3);
+
+    function popMin() {
+        let best = null, bestF = Infinity;
+        for (const [c, f] of open) if (f < bestF) { bestF = f; best = c; }
+        if (best) open.delete(best);
+        return best;
+    }
+
+    const startC = h3Center(startCell, h3);
+    g.set(startCell, 0);
+    open.set(startCell, haversineM(startC, goalC));
+
+    let guard = 0;
+    while (open.size) {
+        if (++guard > 200000) break; // hard safety stop
+        const cur = popMin();
+        if (!cur) break;
+        if (cur === goalCell) {
+            const path = [cur];
+            for (let k = cur; came.has(k);) { k = came.get(k); path.push(k); }
+            return path.reverse();
+        }
+
+        for (const nb of h3.kRing(cur, 1)) {
+            if (nb === cur) continue;
+            if (allowed && !allowed.has(nb)) continue;
+            if (isCellBlocked(nb)) continue;
+
+            const curC = h3Center(cur, h3);
+            const nbC = h3Center(nb, h3);
+            if (chordCrossesLand(curC, nbC, { h3, h3Res, isCellBlocked, sampleMeters: 300 })) continue;
+
+            const tentative = (g.get(cur) ?? Infinity) + haversineM(curC, nbC);
+            if (tentative < (g.get(nb) ?? Infinity)) {
+                g.set(nb, tentative);
+                came.set(nb, cur);
+                open.set(nb, tentative + haversineM(nbC, goalC));
+            }
+        }
+    }
+    return null;
+}
+
+// ── Smoothing ────────────────────────────────────────────────────────────────
+function smoothCenters(centers, losOpts) {
+    if (centers.length <= 2) return centers;
+    const out = [centers[0]];
+    let anchor = 0;
+    for (let i = 2; i < centers.length; i++) {
+        const A = centers[anchor];
+        const C = centers[i];
+        if (chordCrossesLand(A, C, losOpts)) {
+            out.push(centers[i - 1]);
+            anchor = i - 1;
+        }
+    }
+    out.push(centers[centers.length - 1]);
+    return out;
+}
+
+// ── Public API ───────────────────────────────────────────────────────────────
+export function nudgeOffshore(p, opts) {
+    const {
+        h3, h3Res, hasLandCell,
+        maxNudgeMeters = 5000, nudgeStepMeters = 200, dilateKRings = 1
+    } = opts;
+
+    const isCellBlocked = makeIsCellBlocked({ h3, hasLandCell, dilateKRings });
+    const startCell = h3.geoToH3(p.lat, p.lng, h3Res);
+    if (!isCellBlocked(startCell)) return p;
+
+    for (let d = nudgeStepMeters; d <= maxNudgeMeters; d += nudgeStepMeters) {
+        for (let br = 0; br < 360; br += 15) {
+            const q = destM(p, d, br);
+            const cell = h3.geoToH3(q.lat, q.lng, h3Res);
+            if (!isCellBlocked(cell)) return q;
+        }
+    }
+    return p;
+}
+
+export async function autoroute(map, waypoints, opts) {
+    const {
+        h3, h3Res, hasLandCell,
+        dilateKRings = 1, padDeg = 3.0, sampleMeters = 500, corridorStepDeg = 0.08
+    } = opts;
+
+    if (!h3 || typeof h3.geoToH3 !== 'function') throw new Error('autoroute: missing h3');
+    if (typeof hasLandCell !== 'function') throw new Error('autoroute: opts.hasLandCell(h) required');
+
+    const isCellBlocked = makeIsCellBlocked({ h3, hasLandCell, dilateKRings });
+    const routeCoords = [];
+
+    for (let i = 0; i < waypoints.length - 1; i++) {
+        let A = { lng: waypoints[i][0], lat: waypoints[i][1] };
+        let B = { lng: waypoints[i + 1][0], lat: waypoints[i + 1][1] };
+
+        // nudge endpoints slightly offshore if needed
+        A = nudgeOffshore(A, { h3, h3Res, hasLandCell, dilateKRings });
+        B = nudgeOffshore(B, { h3, h3Res, hasLandCell, dilateKRings });
+
+        // Direct chord fast-path
+        if (!chordCrossesLand(A, B, { h3, h3Res, isCellBlocked, sampleMeters })) {
+            if (routeCoords.length === 0) routeCoords.push([A.lng, A.lat]);
+            routeCoords.push([B.lng, B.lat]);
+            continue;
+        }
+
+        // Build corridor and ensure connectivity; then try progressively wider searches.
+        const baseAllowed = corridorCells(A, B, { h3, h3Res, isCellBlocked, padDeg, corridorStepDeg });
+        const allowed1 = expandSetKRings(h3, baseAllowed, 1);     // connect sparse samples
+        const allowed2 = expandSetKRings(h3, baseAllowed, 2);     // wider
+        const allowed3 = corridorCells(A, B, { h3, h3Res, isCellBlocked, padDeg: padDeg * 2, corridorStepDeg: corridorStepDeg * 0.8 });
+
+        const start = nearestWaterCell(A, { h3, h3Res, isCellBlocked, maxRings: 60 });
+        const goal = nearestWaterCell(B, { h3, h3Res, isCellBlocked, maxRings: 60 });
+        if (!start || !goal) throw new Error('No water node near start/end');
+
+        let cells =
+            aStarH3(start, goal, { h3, h3Res, isCellBlocked, allowed: allowed1 }) ||
+            aStarH3(start, goal, { h3, h3Res, isCellBlocked, allowed: allowed2 }) ||
+            aStarH3(start, goal, { h3, h3Res, isCellBlocked, allowed: allowed3 }) ||
+            aStarH3(start, goal, { h3, h3Res, isCellBlocked, allowed: null }); // ultimate fallback
+
+        if (!cells || cells.length < 2) throw new Error('No water path found');
+
+        const centers = cells.map(c => h3Center(c, h3));
+        const smooth = smoothCenters(centers, { h3, h3Res, isCellBlocked, sampleMeters });
+
+        if (routeCoords.length === 0) routeCoords.push([smooth[0].lng, smooth[0].lat]);
+        for (let j = 1; j < smooth.length; j++) {
+            routeCoords.push([smooth[j].lng, smooth[j].lat]);
+        }
+    }
+
+    return {
+        type: 'Feature',
+        properties: { kind: 'autoroute' },
+        geometry: { type: 'LineString', coordinates: routeCoords }
+    };
 }

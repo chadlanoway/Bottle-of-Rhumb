@@ -1,9 +1,26 @@
-// http://184.72.204.18:8000/
-//pk.eyJ1IjoiNTlub3J0aGx0ZCIsImEiOiJjbWFvbWJ3cWkwOHYyMmxwdng0a3U3Y3hwIn0.foCCShBlTgCQ1rzTL85KFg
-// app.js (frontend)
+// app.js
+// ─────────────────────────────────────────────────────────────────────────────
+// REQUIREMENTS (index.html):
+//   <script type="module" src="/app.js"></script>
+//   http://184.72.204.18:8000/
+//   pk.eyJ1IjoiNTlub3J0aGx0ZCIsImEiOiJjbWFvbWJ3cWkwOHYyMmxwdng0a3U3Y3hwIn0.foCCShBlTgCQ1rzTL85KFg
+//   https://dgme6gz9k7dme.cloudfront.net/land_mask.json
+// ─────────────────────────────────────────────────────────────────────────────
+
+// app.js — uses Bloom land set + H3 A* router with land dilation
 import { initDrawingTools } from './drawing-tools.js';
-import { autoroute } from './autoroute.js';
-//import * as mapboxPmTiles from 'https://cdn.jsdelivr.net/npm/mapbox-pmtiles@1.0.54/dist/mapbox-pmtiles.js'; 
+import { autoroute, nudgeOffshore } from './autoroute.js?v=h3astar1';
+import * as turf from 'https://cdn.jsdelivr.net/npm/@turf/turf@6.5.0/+esm';
+import * as h3 from 'https://cdn.jsdelivr.net/npm/h3-js@3.7.2/+esm';
+import BloomPkg from 'https://esm.sh/bloom-filters@3.0.4';
+const { BloomFilter } = BloomPkg;
+
+// ========= CONFIG =========
+const LAND_BLOOM_URL = 'https://dgme6gz9k7dme.cloudfront.net/land-h3-r6-k1.bloom.json';
+const H3_RES = 6;             // hex resolution for routing
+const DILATE_K = 1;           // treat land dilated by 1 ring (= conservative)
+// =========================
+
 mapboxgl.accessToken = 'pk.eyJ1IjoiNTlub3J0aGx0ZCIsImEiOiJjbWFvbWJ3cWkwOHYyMmxwdng0a3U3Y3hwIn0.foCCShBlTgCQ1rzTL85KFg';
 
 const map = new mapboxgl.Map({
@@ -13,123 +30,130 @@ const map = new mapboxgl.Map({
     zoom: 2
 });
 
+const $ = id => document.getElementById(id);
+const setStatus = msg => { const el = $('toolsStatus'); if (el) el.textContent = msg; };
+
 map.on('load', async () => {
+    // Draw tools + right JSON panel
     const api = initDrawingTools(map);
 
-    mapboxgl.Style.setSourceType(
-        mapboxPmTiles.SOURCE_TYPE,
-        mapboxPmTiles.PmTilesSource
-    );
+    const wrap = $('jsonWrap');
+    const tab = $('jsonTab');
+    const txt = $('jsonText');
+    const btnCopy = $('btnCopyJson');
+    const btnDl = $('btnDownloadJson');
 
-    map.addSource('land-src', {
-        type: mapboxPmTiles.SOURCE_TYPE,
-        url: 'https://dgme6gz9k7dme.cloudfront.net/land.pmtiles'
-    });
-
-    await new Promise(res => {
-        const onData = e => {
-            if (e.sourceId === 'land-src' && e.isSourceLoaded) {
-                map.off('sourcedata', onData);
-                res();
-            }
-        };
-        map.on('sourcedata', onData);
-    });
-
-    if (!map.getLayer('land-mask-fill')) {
-        const SOURCE_LAYER = 'land';
-        map.addLayer({
-            id: 'land-mask-fill',
-            type: 'fill',
-            source: 'land-src',
-            'source-layer': SOURCE_LAYER,
-            paint: { 'fill-color': '#000', 'fill-opacity': 0.03 }
-        }, 'waterway-label');
-    }
-
-    console.log('✅ land-mask-fill added using source-layer="land"');
-
-    // Right-panel JSON 
-    const wrap = document.getElementById('jsonWrap');
-    const tab = document.getElementById('jsonTab');
-    const txt = document.getElementById('jsonText');
-    const btnCopy = document.getElementById('btnCopyJson');
-    const btnDl = document.getElementById('btnDownloadJson');
-
-    function render(fc = api.getFeatureCollection()) {
-        if (txt) txt.value = JSON.stringify(fc, null, 2);
-    }
-    window.addEventListener('draw:change', (e) => render(e.detail.fc));
-
-    if (tab && wrap) {
-        tab.addEventListener('click', () => {
-            wrap.classList.toggle('open');
-            tab.setAttribute('aria-expanded', wrap.classList.contains('open'));
-            if (wrap.classList.contains('open')) render();
-        });
-    }
-    if (btnCopy && txt) {
-        btnCopy.addEventListener('click', async () => {
-            try { await navigator.clipboard.writeText(txt.value); btnCopy.textContent = 'Copied!'; setTimeout(() => btnCopy.textContent = 'Copy', 900); }
-            catch { alert('Copy failed'); }
-        });
-    }
-    if (btnDl && txt) {
-        btnDl.addEventListener('click', () => {
-            const blob = new Blob([txt.value], { type: 'application/geo+json' });
-            const a = document.createElement('a');
-            a.href = URL.createObjectURL(blob);
-            a.download = 'drawing.geojson';
-            a.click();
-            URL.revokeObjectURL(a.href);
-        });
-    }
+    const render = (fc = api.getFeatureCollection()) => { if (txt) txt.value = JSON.stringify(fc, null, 2); };
     render();
 
+    tab?.addEventListener('click', () => {
+        wrap.classList.toggle('open');
+        tab.setAttribute('aria-expanded', wrap.classList.contains('open'));
+        if (wrap.classList.contains('open')) render();
+    });
+    btnCopy?.addEventListener('click', async () => {
+        try { await navigator.clipboard.writeText(txt.value); btnCopy.textContent = 'Copied!'; setTimeout(() => btnCopy.textContent = 'Copy', 900); }
+        catch { alert('Copy failed'); }
+    });
+    btnDl?.addEventListener('click', () => {
+        const blob = new Blob([txt.value], { type: 'application/geo+json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'drawing.geojson';
+        a.click();
+        URL.revokeObjectURL(a.href);
+    });
+
+    // Load Bloom land mask (H3 r=6, with k=1 already baked in server-side)
+    setStatus('Loading land mask…');
+    const t0 = performance.now();
+    const bloomJSON = await (await fetch(LAND_BLOOM_URL, { headers: { Accept: 'application/json' } })).json();
+    const landBF = BloomFilter.fromJSON(bloomJSON);
+
+    // Minimal helpers exposed for console sanity checks
+    window.h3 = h3;
+    window.landBF = landBF;
+
+    // Low-level—check raw cell membership (used by router)
+    const hasLandCell = (h) => landBF.has(h);
+
+    // High-level point checker (dilated by DILATE_K rings for extra safety)
+    const isLand = (p) => {
+        const lng = Array.isArray(p) ? p[0] : p.lng;
+        const lat = Array.isArray(p) ? p[1] : p.lat;
+        const cell = h3.geoToH3(lat, lng, H3_RES);
+        if (hasLandCell(cell)) return true;
+        if (DILATE_K > 0) {
+            for (const nb of h3.kRing(cell, DILATE_K)) if (hasLandCell(nb)) return true;
+        }
+        return false;
+    };
+
+    Object.assign(window, { isLand });
+
+    setStatus(`Land mask ready (${Math.round(performance.now() - t0)} ms).`);
+
     // Autoroute button
-    document.getElementById('btnAutoroute')?.addEventListener('click', async () => {
+    $('btnAutoroute')?.addEventListener('click', async () => {
         try {
             const fc = api.getFeatureCollection();
             const pts = fc.features
                 .filter(f => f.geometry?.type === 'Point')
-                .map(f => f.geometry.coordinates);
+                .map(f => /** @type {[number,number]} */(f.geometry.coordinates));
 
             if (pts.length < 2) return alert('Add at least two Points, then click Autoroute.');
 
-            // keep the segment in view so the land tiles are definitely loaded
+            // View
             const bb = new mapboxgl.LngLatBounds(pts[0], pts[0]);
             for (const p of pts) bb.extend(p);
             map.fitBounds(bb, { padding: 80, duration: 0 });
 
-            console.time('autoroute');
-            const route = await autoroute(map, pts, {
-                landLayerId: 'land-mask-fill',
-                padPx: 3,
-                sampleMeters: 900,
-                stepMetersNear: 5000,
-                stepMetersFar: 40000,
-                coastNearMeters: 25000,
-                maxSteps: 24000,
-                detour: {
-                    startKm: 4,
-                    endKm: 800,
-                    grow: 1.5,
-                    angStep: 8
+            // Endpoints must be water (we’ll nudge a hair offshore if needed)
+            const A = { lng: pts[0][0], lat: pts[0][1] };
+            const Z = { lng: pts[pts.length - 1][0], lat: pts[pts.length - 1][1] };
+            if (isLand(A) || isLand(Z)) {
+                // try a small nudge before bailing
+                const A2 = nudgeOffshore(A, { h3, h3Res: H3_RES, hasLandCell, dilateKRings: DILATE_K });
+                const Z2 = nudgeOffshore(Z, { h3, h3Res: H3_RES, hasLandCell, dilateKRings: DILATE_K });
+                if (isLand(A2) || isLand(Z2)) {
+                    return alert('Move the start/end points slightly off the coast (they must be in water).');
                 }
+                // replace original points with nudged copies
+                pts[0] = [A2.lng, A2.lat];
+                pts[pts.length - 1] = [Z2.lng, Z2.lat];
+            }
+
+            setStatus('Routing on water (hex A*)…');
+
+            const route = await autoroute(map, pts, {
+                h3, h3Res: H3_RES,
+                hasLandCell,
+                dilateKRings: DILATE_K,
+                padDeg: 3.0,
+                sampleMeters: 500,
+                corridorStepDeg: 0.08
             });
-            console.timeEnd('autoroute');
 
             const coords = route?.geometry?.coordinates || [];
             if (coords.length < 2) {
-                console.warn('autoroute returned too few coords', route);
-                return alert('No water-only path found with current settings.');
+                setStatus('No water-only route found with current settings.');
+                return alert('No water-only route found with current settings.');
             }
 
             const next = { ...fc, features: [...fc.features, route] };
             api.setFeatureCollection(next);
             render(next);
+
+            try {
+                const km = (await import('https://cdn.jsdelivr.net/npm/@turf/turf@6.5.0/+esm'))
+                    .length(route, { units: 'kilometers' });
+                setStatus(`Route length: ${km.toFixed(1)} km`);
+            } catch {
+                setStatus('Route ready.');
+            }
         } catch (err) {
             console.error('Autoroute failed:', err);
+            setStatus('Autoroute failed.');
             alert(`Autoroute failed: ${err.message || err}`);
         }
     });
