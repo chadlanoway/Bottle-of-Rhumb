@@ -3,7 +3,7 @@
 An interactive web app for planning **water-only sailing or boating routes**.  
 Draw waypoints on the map and let the app automatically calculate the safest path over open water, avoiding land masses using an H3 hex-grid land mask.
 
-![Screenshot](screenshot.png)
+![Screenshot](Screenshot.png)
 
 ---
 
