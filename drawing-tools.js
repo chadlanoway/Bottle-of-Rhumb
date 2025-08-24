@@ -1,22 +1,25 @@
 // drawing-tools.js
+// Sets up drawing tools on the given map (point, line, polygon, clear).
 export function initDrawingTools(map) {
     const toolsStatus = document.getElementById('toolsStatus');
     const wrap = document.getElementById('toolsWrap');
     const toolsTab = document.getElementById('toolsTab');
 
+    // Toggle the tools panel when clicking the tab
     toolsTab?.addEventListener('click', () => {
         wrap.classList.toggle('open');
         toolsTab.setAttribute('aria-expanded', wrap.classList.contains('open'));
     });
 
-    // --- state
-    let mode = null;                    // 'point' | 'line' | 'poly' | null
-    let temp = [];                      // fixed vertices while drawing
-    let fc = { type: 'FeatureCollection', features: [] };
-    let vertsFC = { type: 'FeatureCollection', features: [] };
+    // Current drawing state
+    let mode = null;                    // current mode: 'point', 'line', 'poly', or null
+    let temp = [];                      // fixed vertices for the feature being drawn
+    let fc = { type: 'FeatureCollection', features: [] }; // saved features
+    let vertsFC = { type: 'FeatureCollection', features: [] }; // all vertices
 
-    const FINISH_TOL_PX = 10;           // click this close to last vertex to finish
+    const FINISH_TOL_PX = 10;           // click distance (px) to finish shape
 
+    // Tooltip for showing info while drawing
     let tooltipEl = null;
     function ensureTooltip() {
         if (tooltipEl) return tooltipEl;
@@ -49,7 +52,7 @@ export function initDrawingTools(map) {
         if (tooltipEl) tooltipEl.style.display = 'none';
     }
 
-    // --- distance utils (haversine in meters -> NM) ---
+    // --- distance utilities (for line length in NM) ---
     const R_EARTH_M = 6371008.8;
     const toRad = d => d * Math.PI / 180;
     function haversineMeters(a, b) {
@@ -72,9 +75,11 @@ export function initDrawingTools(map) {
         if (nm < 100) return nm.toFixed(1) + ' nm';
         return Math.round(nm) + ' nm';
     }
-    // ---------- helpers ----------
+
+    // Add a layer to the map only if it does not already exist
     function addLayerOnce(spec) { if (!map.getLayer(spec.id)) map.addLayer(spec); }
 
+    // Turns a feature into its point vertices
     function vertsFromFeature(feat) {
         const f = feat && feat.geometry ? feat : null;
         if (!f) return [];
@@ -84,12 +89,13 @@ export function initDrawingTools(map) {
 
         if (type === 'Point') return [mk(coords)];
         if (type === 'LineString') return coords.map(mk);
-        if (type === 'Polygon') return (coords[0] || []).map(mk); // outer ring only
+        if (type === 'Polygon') return (coords[0] || []).map(mk); // outer ring
         if (type === 'MultiLineString') return coords.flat().map(mk);
         if (type === 'MultiPolygon') return coords.flat(1).flat().map(mk); // outer rings
         return [];
     }
 
+    // Rebuilds the vertices collection from all saved features
     function rebuildVerts() {
         const all = fc.features.flatMap(vertsFromFeature);
         vertsFC = { type: 'FeatureCollection', features: all };
@@ -97,7 +103,7 @@ export function initDrawingTools(map) {
         if (src) src.setData(vertsFC);
     }
 
-    // ---- temp vertices (while drawing) + last-vertex highlight (fixed vertices only)
+    // Show temp vertices while drawing
     function updateTempVerts(fixedCoords) {
         const fcPts = {
             type: 'FeatureCollection',
@@ -121,6 +127,7 @@ export function initDrawingTools(map) {
         }
     }
 
+    // Highlight the most recently placed vertex
     function highlightLast(coord) {
         if (!coord) return;
         const pt = { type: 'Feature', geometry: { type: 'Point', coordinates: coord } };
@@ -142,7 +149,7 @@ export function initDrawingTools(map) {
         }
     }
 
-    // --- permanent sources/layers (re-attach after style reloads)
+    // Creates the permanent draw layers and sources (runs on load and style change)
     function ensureDrawLayers() {
         if (!map.getSource('draw')) {
             map.addSource('draw', { type: 'geojson', data: fc });
@@ -169,7 +176,7 @@ export function initDrawingTools(map) {
             paint: { 'circle-radius': 5, 'circle-color': '#08f', 'circle-stroke-width': 1, 'circle-stroke-color': '#fff' }
         });
 
-        // permanent vertex source (kept in sync), but HIDDEN by default (for future editing)
+        // Permanent vertex source (hidden until needed)
         if (!map.getSource('draw-verts')) {
             rebuildVerts();
             map.addSource('draw-verts', { type: 'geojson', data: vertsFC });
@@ -178,7 +185,7 @@ export function initDrawingTools(map) {
         }
         addLayerOnce({
             id: 'draw-verts', type: 'circle', source: 'draw-verts',
-            layout: { visibility: 'none' }, // hidden after finalize
+            layout: { visibility: 'none' },
             paint: {
                 'circle-radius': 4,
                 'circle-color': '#1e90ff',
@@ -194,16 +201,19 @@ export function initDrawingTools(map) {
     map.on('load', ensureDrawLayers);
     map.on('styledata', ensureDrawLayers);
 
+    // Replace the feature collection and update everything
     function setFC(next) {
         fc = next;
         const src = map.getSource('draw');
         if (src) src.setData(fc);
         rebuildVerts();
-        window.dispatchEvent(new CustomEvent('draw:change', { detail: { fc } })); // <-- add this
+        window.dispatchEvent(new CustomEvent('draw:change', { detail: { fc } }));
     }
 
+    // Add one feature to the collection
     function pushFeature(feat) { setFC({ ...fc, features: [...fc.features, feat] }); }
 
+    // Remove temporary drawing layers and reset temp vertices
     function clearTemp() {
         temp = [];
         ['temp-line', 'temp-poly', 'temp-poly-outline', 'temp-verts', 'temp-last'].forEach(id => {
@@ -212,10 +222,9 @@ export function initDrawingTools(map) {
         });
     }
 
-    // ------- temp line/poly renderers (take fixed + path coords) -------
+    // Draws the temporary line preview while drawing
     function drawTempLine(fixedCoords, pathCoords) {
         const geo = { type: 'Feature', geometry: { type: 'LineString', coordinates: pathCoords } };
-
         if (!map.getSource('temp-line')) {
             map.addSource('temp-line', { type: 'geojson', data: geo });
             map.addLayer({
@@ -223,18 +232,18 @@ export function initDrawingTools(map) {
                 type: 'line',
                 source: 'temp-line',
                 layout: { 'line-cap': 'round', 'line-join': 'round' },
-                paint: { 'line-color': '#1e90ff', 'line-width': 2, 'line-dasharray': [2, 2] } // dotted rubber-band
+                paint: { 'line-color': '#1e90ff', 'line-width': 2, 'line-dasharray': [2, 2] }
             });
         } else {
             map.getSource('temp-line').setData(geo);
         }
-
         updateTempVerts(fixedCoords);
         highlightLast(fixedCoords[fixedCoords.length - 1]);
     }
 
+    // Draws the temporary polygon preview while drawing
     function drawTempPoly(fixedCoords, pathCoords) {
-        // Outline (dotted) for path while drawing
+        // outline
         if (pathCoords.length >= 2) {
             const line = { type: 'Feature', geometry: { type: 'LineString', coordinates: pathCoords } };
             if (!map.getSource('temp-poly-outline')) {
@@ -251,7 +260,7 @@ export function initDrawingTools(map) {
             }
         }
 
-        // Semi-transparent fill preview only when 3+ vertices (valid polygon)
+        // fill
         if (pathCoords.length >= 3) {
             const ring = [...pathCoords, pathCoords[0]];
             const poly = { type: 'Feature', geometry: { type: 'Polygon', coordinates: [ring] } };
@@ -270,12 +279,11 @@ export function initDrawingTools(map) {
             if (map.getLayer('temp-poly')) map.removeLayer('temp-poly');
             if (map.getSource('temp-poly')) map.removeSource('temp-poly');
         }
-
         updateTempVerts(fixedCoords);
         highlightLast(fixedCoords[fixedCoords.length - 1]);
     }
 
-    // ------- finishing helpers -------
+    // Finalize a line and save it
     function finishLine() {
         if (temp.length >= 2) {
             pushFeature({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: temp } });
@@ -288,6 +296,7 @@ export function initDrawingTools(map) {
         map.getCanvas().style.cursor = '';
     }
 
+    // Finalize a polygon and save it
     function finishPoly() {
         if (temp.length >= 3) {
             const ring = [...temp, temp[0]];
@@ -300,6 +309,7 @@ export function initDrawingTools(map) {
         map.getCanvas().style.cursor = '';
     }
 
+    // Checks if a click is near the last placed vertex
     function isNearLastVertex(e) {
         if (!temp.length) return false;
         const last = temp[temp.length - 1];
@@ -307,10 +317,9 @@ export function initDrawingTools(map) {
         const dx = e.point.x - pLast.x;
         const dy = e.point.y - pLast.y;
         return Math.hypot(dx, dy) <= FINISH_TOL_PX;
-        // Note: pixel tolerance avoids coordinate equality issues.
     }
 
-    // ------- toolbar -------
+    // Toolbar buttons: set mode, reset temp, update status
     document.getElementById('btnPoint')?.addEventListener('click', () => {
         mode = 'point'; temp = [];
         toolsStatus && (toolsStatus.textContent = 'mode: POINT — click map to add a point');
@@ -324,7 +333,6 @@ export function initDrawingTools(map) {
         map.doubleClickZoom.disable();
         map.getCanvas().style.cursor = 'crosshair';
         clearTemp();
-        // NEW:
         ensureTooltip();
         showTooltip('0.00 nm', { x: map.getCanvas().width / 2, y: map.getCanvas().height / 2 });
     });
@@ -336,13 +344,14 @@ export function initDrawingTools(map) {
         map.getCanvas().style.cursor = 'crosshair';
         clearTemp();
     });
+
     document.getElementById('btnClear')?.addEventListener('click', () => {
         clearTemp();
         setFC({ type: 'FeatureCollection', features: [] });
         toolsStatus && (toolsStatus.textContent = 'cleared');
     });
 
-    // ------- drawing clicks -------
+    // Handle clicks for each mode
     map.on('click', (e) => {
         if (!mode) return;
         const p = [e.lngLat.lng, e.lngLat.lat];
@@ -355,16 +364,13 @@ export function initDrawingTools(map) {
         }
 
         if (mode === 'line') {
-            // finish if user re-clicks last vertex (with tolerance) and we already have 2+
             if (isNearLastVertex(e) && temp.length >= 2) return finishLine();
             temp.push(p);
-            // show rubber-band from last vertex to cursor (mousemove handler updates)
             drawTempLine(temp, temp);
             return;
         }
 
         if (mode === 'poly') {
-            // finish if user re-clicks last vertex (with tolerance) and we already have 3+
             if (isNearLastVertex(e) && temp.length >= 3) return finishPoly();
             temp.push(p);
             drawTempPoly(temp, temp);
@@ -372,7 +378,7 @@ export function initDrawingTools(map) {
         }
     });
 
-    // ------- mousemove rubber-band -------
+    // Handle mouse move for live preview
     map.on('mousemove', (e) => {
         if (!mode) return;
         const cursor = [e.lngLat.lng, e.lngLat.lat];
@@ -380,12 +386,10 @@ export function initDrawingTools(map) {
         if (mode === 'line') {
             if (temp.length >= 1) {
                 const path = [...temp, cursor];
-                drawTempLine(temp, path); // existing dashed preview
-                // NEW: update tooltip with total length
+                drawTempLine(temp, path);
                 const nm = metersToNM(pathMeters(path));
                 showTooltip(formatNM(nm), e.point);
             } else {
-                // show 0 until first point added
                 showTooltip('0.00 nm', e.point);
             }
         }
@@ -395,21 +399,18 @@ export function initDrawingTools(map) {
                 const path = [...temp, cursor];
                 drawTempPoly(temp, path);
             }
-            // Hide tooltip during polygon mode (optional)
             hideTooltip();
         }
     });
 
-
-    // ------- finish on double-click -------
+    // Double-click finishes a line or polygon
     map.on('dblclick', (e) => {
-        e.preventDefault(); // no zoom jitter
-
+        e.preventDefault();
         if (mode === 'line') return finishLine();
         if (mode === 'poly') return finishPoly();
     });
 
-    // expose helpers (incl. vertex visibility toggle for future "Edit" mode)
+    // Return helper functions for external use
     return {
         getFeatureCollection: () => fc,
         setFeatureCollection: (next) => setFC(next || { type: 'FeatureCollection', features: [] }),
