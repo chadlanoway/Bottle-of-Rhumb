@@ -3,7 +3,7 @@
 [**▶ Live Demo**](http://184.72.204.18:8000/)
 
 An interactive web app for planning **sailing or boating routes**.  
-Draw waypoints on the map and let the app automatically calculate the safest path over open water, avoiding land masses using an H3 hex-grid land mask.
+Draw waypoints on the map and let the app automatically calculate paths over open water, avoiding land masses using an H3 hex-grid land mask. 
 
 ![Screenshot](Screenshot.png)
 
@@ -41,6 +41,15 @@ When you select two or more waypoints and click **Autoroute**, the app:
    - As a last resort, recursively tries perpendicular detours until a water path is found.
 
 At each step, the route is checked for **land crossings** and rejected if any segment intersects land.
+
+---
+
+## TODO
+
+-Can take quite awhile for more complex routes (up to 4 min), I think more optimization can be done
+-Resolution of land mask is pretty low, considering adding hi-res masks for areas like Norway, BC etc.
+-Needs additional handling for narrow straits like Gibralter, and corridor for the Panama canal
+-Long detours around continents tend to fail, needs further troubleshooting there
 
 ---
 
