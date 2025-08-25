@@ -68,20 +68,6 @@ window.isWaterRendered = isWaterRendered;
 const $ = id => document.getElementById(id);
 const setStatus = msg => { const el = $('toolsStatus'); if (el) el.textContent = msg; };
 
-/** Expands a map bounds box by a percentage so the view isnt too tight. */
-function padBounds(bounds, ratio = 0.15) {
-    const sw = bounds.getSouthWest();
-    const ne = bounds.getNorthEast();
-    const dLon = ne.lng - sw.lng;
-    const dLat = ne.lat - sw.lat;
-    const padLon = dLon * ratio;
-    const padLat = dLat * ratio;
-    return new mapboxgl.LngLatBounds(
-        [sw.lng - padLon, sw.lat - padLat],
-        [ne.lng + padLon, ne.lat + padLat]
-    );
-}
-
 /** Fits the main map to a set of points, handling the 180 dateline */
 function fitMainMapDatelineSafe(pts /* [[lng,lat], ...] */) {
     if (!pts.length) return;
@@ -111,22 +97,46 @@ function unwrapLng(lng, ref) {
 }
 
 /** Splits a long line into pieces when it would otherwise cross the dateline the long way */
-function segmentsSplitOnDateline(pts /* [{lng,lat}, ...] */) {
+function segmentsSplitOnDateline(pts) {
     if (!pts || pts.length < 2) return [pts || []];
-    const segs = [];
-    let cur = [pts[0]];
+    const norm = l => ((l + 540) % 360) - 180;
+
+    const out = [];
+    let seg = [{ lng: norm(pts[0].lng), lat: pts[0].lat }];
+
     for (let i = 1; i < pts.length; i++) {
-        const prev = pts[i - 1], p = pts[i];
-        const dλ = Math.abs(p.lng - prev.lng);
-        if (dλ > 180) {         // break so the renderer doesn’t wrap the long way
-            segs.push(cur);
-            cur = [p];
-        } else {
-            cur.push(p);
-        }
+        const p0 = seg[seg.length - 1];
+        const p1n = { lng: norm(pts[i].lng), lat: pts[i].lat };
+        const d = p1n.lng - p0.lng;
+
+        // short hop: no split
+        if (Math.abs(d) <= 180) { seg.push(p1n); continue; }
+
+        // unwrap p1 toward p0 so we move the short way
+        const p1uLng = p1n.lng - Math.sign(d) * 360; // if d>0 subtract 360; else add 360
+
+        // pick the boundary that lies between L1 and L2 after unwrap
+        const L1 = p0.lng, L2 = p1uLng;
+        const boundary = (L2 > L1) ? 180 : -180;
+
+        // t where the line hits the boundary, then interpolate latitude
+        const denom = (L2 - L1);
+        let t = Math.abs(denom) > 1e-9 ? (boundary - L1) / denom : 0.5;
+        t = Math.max(0, Math.min(1, t));
+        const latAtBoundary = p0.lat + (p1n.lat - p0.lat) * t;
+
+        // close current segment at the boundary
+        seg.push({ lng: boundary, lat: latAtBoundary });
+        out.push(seg);
+
+        // start next segment on the opposite boundary and continue to p1
+        const opposite = boundary === 180 ? -180 : 180;
+        seg = [{ lng: opposite, lat: latAtBoundary }, p1n];
     }
-    if (cur.length) segs.push(cur);
-    return segs;
+
+    out.push(seg);
+    // drop zero-length segments
+    return out.filter(s => s.length >= 2);
 }
 
 /** Fits the hidden hi-zoom map to a list of sample points for quick water checks */
@@ -157,7 +167,7 @@ function ensureWorker() {
     routeWorker = new Worker(workerUrl, { type: 'module' });
     routeWorker.onmessage = (ev) => {
         const { type } = ev.data || {};
-        if (type === 'inited') { setStatus('Land mask ready (worker).'); return; }
+        //if (type === 'inited') { setStatus('Land mask ready (worker).'); return; }
         if (type === 'started') { setStatus(`Routing on water (worker)… (${ev.data.segments} segment${ev.data.segments === 1 ? '' : 's'})`); return; }
     };
     routeWorker.onerror = (e) => { console.error('Worker crashed:', e.message || e); alert(`Autoroute worker crashed: ${e.message || e}`); };
@@ -239,7 +249,7 @@ map.on('load', async () => {
     });
 
     // Load the land mask Bloom filter and expose an isLand helper.
-    setStatus('Loading land mask…');
+    //setStatus('Loading land mask…');
     const t0 = performance.now();
     const bloomJSON = await (await fetch(LAND_BLOOM_URL, { headers: { Accept: 'application/json' } })).json();
     const landBF = BloomFilter.fromJSON(bloomJSON);
@@ -260,7 +270,7 @@ map.on('load', async () => {
     Object.assign(window, { isLand });
 
     ensureWorker().postMessage({ type: 'init', bloomJSON });
-    setStatus(`Land mask ready (${Math.round(performance.now() - t0)} ms).`);
+    //setStatus(`Land mask ready (${Math.round(performance.now() - t0)} ms).`);
 
     // Autoroute button asks worker for a water only route, then renders the result.
     document.getElementById('btnAutoroute')?.addEventListener('click', async () => {
@@ -313,7 +323,7 @@ map.on('load', async () => {
             // Split the route so it draws correctly across the 180 line
             const ptsLL = coords.map(([lng, lat]) => ({ lng, lat }));
             const segs = segmentsSplitOnDateline(ptsLL);
-
+            console.log('dateline split segments:', segs.length);
             // Build one LineString per segment and add to the current drawing
             const segFeatures = segs.map((seg, idx) => ({
                 type: 'Feature',
@@ -395,4 +405,5 @@ map.on('load', async () => {
         }
         return Array.from(cells);
     }
+
 });

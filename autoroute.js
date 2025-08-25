@@ -6,6 +6,8 @@ const R = 6371008.8;
 const toRad = d => d * Math.PI / 180;
 const toDeg = r => r * 180 / Math.PI;
 
+const normLng = lng => ((lng + 540) % 360) - 180;
+
 function haversineM(a, b) {
     const dLat = toRad(b.lat - a.lat), dLon = toRad(b.lng - a.lng);
     const s1 = Math.sin(dLat / 2), s2 = Math.sin(dLon / 2);
@@ -407,6 +409,8 @@ export async function autoroute(_map, waypoints, opts) {
         const snapB = snapEndpointToWater(B, { h3, h3Res, hasLandCell, dilateKRings, searchMaxRings: 120, safetyMeters: 150, hintBearing: bearing(B, A) });
 
         A = snapA.point; B = snapB.point;
+        A.lng = normLng(A.lng);
+        B.lng = normLng(B.lng);
         console.log('[worker] start:', A, 'end:', B);
         const preDock = snapA.dockLeg, postDock = snapB.dockLeg;
 
