@@ -452,6 +452,20 @@ export async function autoroute(_map, waypoints, opts) {
                 aStarH3(start, goal, { h3, h3Res, isCellBlocked, allowed: allowed2, maxExpansions: 350000 }) ||
                 aStarH3(start, goal, { h3, h3Res, isCellBlocked, allowed: null, maxExpansions: 400000 });
             console.log('[worker] fine path length:', cells ? cells.length : null, cells);
+            if (!cells) {
+                const dMeters = haversineM(A, B);
+                const blocked = chordCrossesLand(A, B, { h3, h3Res, isCellBlocked: isCellBlockedBuffered, sampleMeters: Math.max(400, sampleMeters) });
+                const needsWide = blocked && dMeters > 3000000; // > 3000 km and straight chord hits land
+                if (needsWide) {
+                    const widePad = Math.max(padDeg * 3, 14); // ~14–18° gives room to reach Cape Horn
+                    const wideAllowed = corridorCells(A, B, { h3, h3Res, isCellBlocked, padDeg: widePad, corridorStepDeg: Math.max(0.12, corridorStepDeg) });
+                    const wideAllowed2 = expandSetKRings(h3, wideAllowed, 3);
+                    console.log('[worker] wide corridor cells:', wideAllowed.size);
+                    cells =
+                        aStarH3(start, goal, { h3, h3Res, isCellBlocked, allowed: wideAllowed2, maxExpansions: 1200000 }) ||
+                        aStarH3(start, goal, { h3, h3Res, isCellBlocked, allowed: null, maxExpansions: 1500000 });
+                }
+            }
             if (cells && cells.length >= 2) {
                 const centers = cells.map(c => h3Center(c, h3));
                 const smooth = smoothCenters(centers, { h3, h3Res, isCellBlocked, sampleMeters: Math.max(300, sampleMeters) });

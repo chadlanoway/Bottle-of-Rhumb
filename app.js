@@ -168,7 +168,7 @@ function ensureWorker() {
     routeWorker.onmessage = (ev) => {
         const { type } = ev.data || {};
         //if (type === 'inited') { setStatus('Land mask ready (worker).'); return; }
-        if (type === 'started') { setStatus(`Routing on water (worker)… (${ev.data.segments} segment${ev.data.segments === 1 ? '' : 's'})`); return; }
+        if (type === 'started') { setStatus(`Routing on water (worker)… long routes can take a few minutes (${ev.data.segments} segment${ev.data.segments === 1 ? '' : 's'})`); return; }
     };
     routeWorker.onerror = (e) => { console.error('Worker crashed:', e.message || e); alert(`Autoroute worker crashed: ${e.message || e}`); };
     routeWorker.onmessageerror = (e) => { console.error('Worker message clone error:', e); alert('Autoroute worker could not transfer the result (clone error).'); };
@@ -185,7 +185,7 @@ function requestRouteWithWorker(pts, opts) {
             const { type } = ev.data || {};
             if (type === 'route') { clearTimeout(timer); w.removeEventListener('message', onMsg); resolve(ev.data.route); }
             else if (type === 'error') { clearTimeout(timer); w.removeEventListener('message', onMsg); reject(new Error(ev.data.message)); }
-            else if (type === 'started') { setStatus(`Routing on water (worker)… (${ev.data.segments} segment${ev.data.segments === 1 ? '' : 's'})`); }
+            else if (type === 'started') { setStatus(`Routing on water (worker)… long routes can take a few minutes (${ev.data.segments} segment${ev.data.segments === 1 ? '' : 's'})`); }
         };
         w.addEventListener('message', onMsg);
         w.postMessage({ type: 'route', pts, opts });
@@ -286,7 +286,7 @@ map.on('load', async () => {
             }
 
             fitMainMapDatelineSafe(pts);
-            setStatus('Routing on water (worker)…');
+            setStatus('Routing on water (worker)… long routes can take a few minutes ');
 
             // Fit the hidden map to a GC chord between first two points (improves water checks)
             const chord = chordSamples(pts[0][0], pts[0][1], pts[1][0], pts[1][1], 80);
