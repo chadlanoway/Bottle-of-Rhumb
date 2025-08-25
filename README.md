@@ -47,8 +47,11 @@ At each step, the route is checked for **land crossings** and rejected if any se
 ## TODO
 
 -Can take quite awhile for more complex routes (up to 4 min), I think more optimization can be done
+
 -Resolution of land mask is pretty low, considering adding hi-res masks for areas like Norway, BC etc.
+
 -Needs additional handling for narrow straits like Gibralter, and corridor for the Panama canal
+
 -Long detours around continents tend to fail, needs further troubleshooting there
 
 ---
